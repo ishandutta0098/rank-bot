@@ -30,11 +30,9 @@ from pydantic import BaseModel, TypeAdapter
 
 from config import Config
 from models import AllDifficultyScores, CodeQualityResult, ConceptScoreResult
-from prompts import (
-    build_code_quality_judge_instructions,
-    build_concept_judge_instructions,
-    build_difficulty_judge_instructions,
-)
+from prompts import (build_code_quality_judge_instructions,
+                     build_concept_judge_instructions,
+                     build_difficulty_judge_instructions)
 from tools import ALL_TOOLS
 
 log = logging.getLogger(__name__)
@@ -114,7 +112,9 @@ def _extract_json(text: str) -> str:
     return stripped
 
 
-def _patched_validate_json(json_str: str, type_adapter: TypeAdapter, partial: bool):  # noqa: ANN001, ANN201
+def _patched_validate_json(
+    json_str: str, type_adapter: TypeAdapter, partial: bool
+):  # noqa: ANN001, ANN201
     """Validate JSON with automatic extraction of JSON from preamble text.
 
     Args:

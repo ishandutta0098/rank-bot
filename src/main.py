@@ -23,20 +23,10 @@ from openai import APIStatusError
 
 from agents_factory import create_agents
 from config import Config
-from models import (
-    CodeQualityResult,
-    ConceptScoreResult,
-    DifficultyScoreEntry,
-    GroupInfo,
-)
-from scoring import (
-    build_project_prompt,
-    generate_report,
-    load_c3_reference,
-    load_groups_from_csv,
-    load_syllabus,
-    write_scores_to_csv,
-)
+from models import (CodeQualityResult, ConceptScoreResult,
+                    DifficultyScoreEntry, GroupInfo)
+from scoring import (build_project_prompt, generate_report, load_c3_reference,
+                     load_groups_from_csv, load_syllabus, write_scores_to_csv)
 
 log = logging.getLogger("rank_bot")
 
@@ -85,6 +75,7 @@ async def collect_project_summary(
     )
 
     from agents import Agent, ModelSettings
+
     from tools import ALL_TOOLS
 
     # Create a lightweight summarizer agent (no structured output)
@@ -139,7 +130,9 @@ async def run_evaluation(
 
     # --- Phase 0.5: Create agents ---
     concept_judge, quality_judge, difficulty_judge = create_agents(
-        config, syllabus, c3_ref,
+        config,
+        syllabus,
+        c3_ref,
     )
 
     # --- Phase 1: Collect project summaries for difficulty judge ---
@@ -148,7 +141,9 @@ async def run_evaluation(
     for g in groups:
         log.info("Collecting summary for Group %d", g.group)
         try:
-            summaries[g.group] = await collect_project_summary(g, concept_judge, repo=repo)
+            summaries[g.group] = await collect_project_summary(
+                g, concept_judge, repo=repo
+            )
         except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
             log.error("Failed to collect summary for Group %d: %s", g.group, exc)
             summaries[g.group] = f"Group {g.group}: Summary collection failed."
@@ -188,15 +183,13 @@ async def run_evaluation(
 
     # --- Phase 3: Relative difficulty scoring (all at once) ---
     log.info("Phase 3: Scoring Difficulty (relative)")
-    all_summaries_text = "\n\n---\n\n".join(
-        summaries[g.group] for g in groups
-    )
+    all_summaries_text = "\n\n---\n\n".join(summaries[g.group] for g in groups)
     difficulty_scores: dict[int, DifficultyScoreEntry] = {}
     try:
-        diff_result = await Runner.run(difficulty_judge, all_summaries_text, max_turns=5)
-        difficulty_scores = {
-            s.group: s for s in diff_result.final_output.scores
-        }
+        diff_result = await Runner.run(
+            difficulty_judge, all_summaries_text, max_turns=5
+        )
+        difficulty_scores = {s.group: s for s in diff_result.final_output.scores}
         for gn, entry in sorted(difficulty_scores.items()):
             log.info("Group %d Difficulty: %d/10", gn, entry.score)
     except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
@@ -219,17 +212,21 @@ async def run_evaluation(
         c = concept_scores.get(gn)
         d = difficulty_scores.get(gn)
         q = quality_scores.get(gn)
-        scores_list.append({
-            "group": gn,
-            "concept_score": c.score if c else 0,
-            "concept_justification": c.justification if c else "No submission",
-            "concept_concepts_found": c.concepts_found if c else [],
-            "difficulty_score": d.score if d else 0,
-            "difficulty_justification": d.justification if d else "No submission",
-            "code_quality_score": q.score if q else 0,
-            "code_quality_justification": q.justification if q else "No submission",
-            "total": (c.score if c else 0) + (d.score if d else 0) + (q.score if q else 0),
-        })
+        scores_list.append(
+            {
+                "group": gn,
+                "concept_score": c.score if c else 0,
+                "concept_justification": c.justification if c else "No submission",
+                "concept_concepts_found": c.concepts_found if c else [],
+                "difficulty_score": d.score if d else 0,
+                "difficulty_justification": d.justification if d else "No submission",
+                "code_quality_score": q.score if q else 0,
+                "code_quality_justification": q.justification if q else "No submission",
+                "total": (c.score if c else 0)
+                + (d.score if d else 0)
+                + (q.score if q else 0),
+            }
+        )
 
     scores_list.sort(key=lambda x: x["total"], reverse=True)
     json_path = base_dir / f"{cohort.lower()}_scores.json"
@@ -244,7 +241,9 @@ async def run_evaluation(
     print(f"\n{'='*60}")
     print(f" {cohort} Hackathon Evaluation Results")
     print(f"{'='*60}")
-    print(f"{'Rank':<5} {'Group':<7} {'Concept':<9} {'Diff':<6} {'Quality':<9} {'Total':<6}")
+    print(
+        f"{'Rank':<5} {'Group':<7} {'Concept':<9} {'Diff':<6} {'Quality':<9} {'Total':<6}"
+    )
     print(f"{'-'*5} {'-'*7} {'-'*9} {'-'*6} {'-'*9} {'-'*6}")
     for rank, entry in enumerate(scores_list, 1):
         print(

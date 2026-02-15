@@ -9,12 +9,8 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
-from models import (
-    CodeQualityResult,
-    ConceptScoreResult,
-    DifficultyScoreEntry,
-    GroupInfo,
-)
+from models import (CodeQualityResult, ConceptScoreResult,
+                    DifficultyScoreEntry, GroupInfo)
 
 log = logging.getLogger(__name__)
 
@@ -103,15 +99,17 @@ def load_groups_from_csv(csv_path: Path) -> list[GroupInfo]:
             video_link = row.get("Video Link", "").strip()
             branch, path, is_zip, is_commit = parse_project_link(project_link)
 
-            groups.append(GroupInfo(
-                group=int(raw_group),
-                project_link=project_link,
-                video_link=video_link,
-                branch=branch,
-                path=path,
-                is_zip=is_zip,
-                is_commit=is_commit,
-            ))
+            groups.append(
+                GroupInfo(
+                    group=int(raw_group),
+                    project_link=project_link,
+                    video_link=video_link,
+                    branch=branch,
+                    path=path,
+                    is_zip=is_zip,
+                    is_commit=is_commit,
+                )
+            )
 
     return groups
 
@@ -183,7 +181,9 @@ def load_c3_reference(csv_path: Path) -> str:
             quality = row.get("Code Quality (10)", "").strip() or "-"
             total = row.get("Total (30)", "").strip() or "-"
             comments = row.get("Comments", "").strip() or ""
-            lines.append(f"| {grp} | {concept} | {diff} | {quality} | {total} | {comments} |")
+            lines.append(
+                f"| {grp} | {concept} | {diff} | {quality} | {total} | {comments} |"
+            )
 
     return "\n".join(lines)
 
@@ -352,7 +352,9 @@ def generate_report(
         if q:
             lines.append(f"**Code Quality Score: {q.score}/10**")
             lines.append(f"- Folder structure: {'✓' if q.has_proper_folders else '✗'}")
-            lines.append(f"- README: {'✓' if q.has_readme else '✗'} ({q.readme_quality})")
+            lines.append(
+                f"- README: {'✓' if q.has_readme else '✗'} ({q.readme_quality})"
+            )
             lines.append(f"- Requirements: {'✓' if q.has_requirements_txt else '✗'}")
             lines.append(f"- Env handling: {'✓' if q.has_env_handling else '✗'}")
             lines.append(f"- Organization: {q.code_organization}")
@@ -415,9 +417,21 @@ def write_scores_to_csv(
             row["Code Quality (10)"] = str(q.score)
 
         # Recompute total from whatever is in the row now
-        cs = int(row["Concept Score (10)"]) if row.get("Concept Score (10)", "").strip().isdigit() else 0
-        ds = int(row["Difficulty Level (10)"]) if row.get("Difficulty Level (10)", "").strip().isdigit() else 0
-        qs = int(row["Code Quality (10)"]) if row.get("Code Quality (10)", "").strip().isdigit() else 0
+        cs = (
+            int(row["Concept Score (10)"])
+            if row.get("Concept Score (10)", "").strip().isdigit()
+            else 0
+        )
+        ds = (
+            int(row["Difficulty Level (10)"])
+            if row.get("Difficulty Level (10)", "").strip().isdigit()
+            else 0
+        )
+        qs = (
+            int(row["Code Quality (10)"])
+            if row.get("Code Quality (10)", "").strip().isdigit()
+            else 0
+        )
         total = cs + ds + qs
         row["Total (30)"] = str(total) if total > 0 else ""
 

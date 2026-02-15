@@ -50,14 +50,22 @@ class Config:
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         assert api_key, "OPENROUTER_API_KEY environment variable must be set"
 
-        base = Path(os.environ.get("RANK_BOT_BASE", Path(__file__).resolve().parents[1]))
+        base = Path(
+            os.environ.get("RANK_BOT_BASE", Path(__file__).resolve().parents[1])
+        )
 
         return cls(
             openrouter_api_key=api_key,
             model_name=os.environ.get("RANK_BOT_MODEL", "anthropic/claude-sonnet-4"),
             repo_c4_path=base / "Submissions-C4",
             repo_c3_path=base / "Submissions_C3",
-            c3_csv_path=base / "sheets" / "Outskill Eng Accelerator Score Card - C3.csv",
-            c4_csv_path=base / "sheets" / "Outskill Eng Accelerator Score Card - C4.csv",
-            syllabus_csv_path=base / "sheets" / "Engineering Accelerator Program - Schedule + Roadmap.csv",
+            c3_csv_path=base
+            / "sheets"
+            / "Outskill Eng Accelerator Score Card - C3.csv",
+            c4_csv_path=base
+            / "sheets"
+            / "Outskill Eng Accelerator Score Card - C4.csv",
+            syllabus_csv_path=base
+            / "sheets"
+            / "Engineering Accelerator Program - Schedule + Roadmap.csv",
         )

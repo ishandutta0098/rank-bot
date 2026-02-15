@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Domain types (frozen dataclasses)
 # ---------------------------------------------------------------------------

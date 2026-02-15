@@ -40,10 +40,7 @@ def _filter_paths(paths: list[str]) -> list[str]:
     Returns:
         Filtered list with noise directories removed.
     """
-    return [
-        p for p in paths
-        if not any(ig in p for ig in _IGNORE_PATTERNS)
-    ]
+    return [p for p in paths if not any(ig in p for ig in _IGNORE_PATTERNS)]
 
 
 def _resolve_repo_dir(repo: str) -> Path:
@@ -93,7 +90,11 @@ def git_list_files(repo: str, branch: str, path: str = "") -> str:
 
     log.info("git_list_files: repo=%s branch=%s path=%s", repo, branch, path)
     result = subprocess.run(
-        cmd, cwd=repo_dir, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+        cmd,
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT,
     )
 
     if result.returncode != 0:
@@ -132,7 +133,10 @@ def git_read_file(repo: str, branch: str, filepath: str) -> str:
     log.info("git_read_file: repo=%s spec=%s", repo, object_spec)
     result = subprocess.run(
         ["git", "show", object_spec],
-        cwd=repo_dir, capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT,
     )
 
     if result.returncode != 0:
@@ -243,7 +247,9 @@ def extract_zip_and_list(repo: str, branch: str, zip_path: str) -> str:
     log.info("extract_zip_and_list: repo=%s spec=%s", repo, object_spec)
     result = subprocess.run(
         ["git", "show", object_spec],
-        cwd=repo_dir, capture_output=True, timeout=_GIT_TIMEOUT,
+        cwd=repo_dir,
+        capture_output=True,
+        timeout=_GIT_TIMEOUT,
     )
 
     if result.returncode != 0:
@@ -279,7 +285,9 @@ def extract_zip_and_list(repo: str, branch: str, zip_path: str) -> str:
 
 
 @function_tool
-def read_file_from_zip(repo: str, branch: str, zip_path: str, file_inside_zip: str) -> str:
+def read_file_from_zip(
+    repo: str, branch: str, zip_path: str, file_inside_zip: str
+) -> str:
     """Read a specific file from inside a .zip archive on a git branch.
 
     Args:
@@ -297,7 +305,9 @@ def read_file_from_zip(repo: str, branch: str, zip_path: str, file_inside_zip: s
 
     result = subprocess.run(
         ["git", "show", object_spec],
-        cwd=repo_dir, capture_output=True, timeout=_GIT_TIMEOUT,
+        cwd=repo_dir,
+        capture_output=True,
+        timeout=_GIT_TIMEOUT,
     )
 
     if result.returncode != 0:
