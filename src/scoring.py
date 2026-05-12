@@ -1,4 +1,4 @@
-"""Pure functions for CSV parsing, URL parsing, and report generation.
+"""Pure functions for CSV/xlsx parsing, URL parsing, and report generation.
 
 No side effects — all I/O is done via arguments and return values.
 """
@@ -8,6 +8,8 @@ import logging
 import re
 from pathlib import Path
 from urllib.parse import unquote
+
+import openpyxl
 
 from models import (
     CodeQualityResult,
@@ -77,6 +79,57 @@ def parse_project_link(link: str) -> tuple[str | None, str | None, bool, bool]:
     return (None, None, False, False)
 
 
+def _extract_github_repo_url(link: str) -> str | None:
+    """Normalise any GitHub link to a bare clone URL.
+
+    Handles full HTTPS URLs (with or without .git suffix and sub-paths) and
+    bare ``user/repo`` partial paths.
+
+    Args:
+        link: Raw project link from the scorecard.
+
+    Returns:
+        Normalised ``https://github.com/user/repo`` URL, or None if the link
+        cannot be mapped to a GitHub repository.
+    """
+    if not link or not link.strip():
+        return None
+    link = link.strip()
+
+    # Partial "user/repo" format — no scheme, exactly one slash
+    if not link.startswith("http") and link.count("/") == 1:
+        return f"https://github.com/{link}"
+
+    # Full GitHub URL — strip everything after the repo name
+    m = re.match(r"(https?://github\.com/[^/]+/[^/]+?)(?:\.git)?(?:/.*)?$", link)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def _parse_group_number(raw: object) -> int | None:
+    """Extract an integer group number from a raw cell value.
+
+    Handles floats (``1.0`` → ``1``) and strings like ``'17 (Individual)'``.
+
+    Args:
+        raw: Raw cell value from the xlsx.
+
+    Returns:
+        Integer group number, or None if unparseable.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s == "Group":
+        return None
+    m = re.match(r"^(\d+)", s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CSV loading
 # ---------------------------------------------------------------------------
@@ -115,6 +168,60 @@ def load_groups_from_csv(csv_path: Path) -> list[GroupInfo]:
                 )
             )
 
+    return groups
+
+
+def load_groups_from_xlsx(xlsx_path: Path, sheet_name: str) -> list[GroupInfo]:
+    """Parse a scorecard xlsx sheet into a list of GroupInfo objects.
+
+    Used for cohorts (e.g. C6) where each group submitted an external GitHub
+    repository rather than a branch of a shared local repo.
+
+    Args:
+        xlsx_path: Path to the xlsx workbook.
+        sheet_name: Name of the sheet to read (e.g. 'C6').
+
+    Returns:
+        List of GroupInfo, one per data row with a parseable group number.
+    """
+    wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    ws = wb[sheet_name]
+    groups: list[GroupInfo] = []
+
+    for row in ws.iter_rows(values_only=True):
+        gn = _parse_group_number(row[0])
+        if gn is None:
+            continue
+
+        project_link = str(row[1]).strip() if row[1] is not None else ""
+        # Video Link column may contain ArrayFormula objects when data_only=True
+        raw_video = row[2]
+        video_link = str(raw_video).strip() if isinstance(raw_video, str) else ""
+
+        # Use standard branch/path extraction for links that have them
+        branch, path, is_zip, is_commit = parse_project_link(project_link)
+
+        repo_url = _extract_github_repo_url(project_link)
+
+        # For a bare repo URL parse_project_link returns branch=None; treat as main
+        if branch is None and repo_url:
+            branch = "main"
+
+        groups.append(
+            GroupInfo(
+                group=gn,
+                project_link=project_link,
+                video_link=video_link,
+                branch=branch,
+                path=path,
+                is_zip=is_zip,
+                is_commit=is_commit,
+                is_external=True,
+                external_repo_url=repo_url,
+            )
+        )
+
+    wb.close()
     return groups
 
 
@@ -205,12 +312,26 @@ def build_project_prompt(group: GroupInfo, repo: str = "c4") -> str:
 
     Args:
         group: Parsed group metadata.
-        repo: Which repo this group belongs to ('c3' or 'c4').
+        repo: Which repo this group belongs to ('c3', 'c4', or 'c6').
 
     Returns:
         Prompt string to send to the judge agents.
     """
     header = f"# Evaluate Group {group.group}\n\n"
+
+    # External repos (C6 style): clone directly from GitHub
+    if group.is_external:
+        repo_url = group.external_repo_url or group.project_link
+        clone_dir = f"/tmp/rankbot_g{group.group}"
+        path_note = f"\n- Sub-path to inspect: `{group.path}`" if group.path else ""
+        return header + (
+            f"This project is in an external GitHub repository.\n"
+            f"- Repository URL: {repo_url}{path_note}\n\n"
+            f"Inspect the project by running:\n"
+            f"  [ -d {clone_dir} ] || git clone --depth 1 {repo_url} {clone_dir}\n"
+            f"Then explore the files under `{clone_dir}/`.\n"
+            f"Look for README, app entry points, agent definitions, and graph files."
+        )
 
     match (group.branch, group.is_zip, group.is_commit):
         case (None, _, _):
@@ -288,6 +409,7 @@ def generate_report(
     concept_scores: dict[int, ConceptScoreResult],
     difficulty_scores: dict[int, DifficultyScoreEntry],
     quality_scores: dict[int, CodeQualityResult],
+    cohort: str = "C4",
 ) -> str:
     """Generate the final markdown evaluation report with rankings.
 
@@ -296,12 +418,13 @@ def generate_report(
         concept_scores: Concept scores keyed by group number.
         difficulty_scores: Difficulty scores keyed by group number.
         quality_scores: Code quality scores keyed by group number.
+        cohort: Cohort label used in the report title (e.g. 'C4', 'C6').
 
     Returns:
         Complete markdown report string.
     """
     lines: list[str] = [
-        "# C4 Hackathon Evaluation Report",
+        f"# {cohort} Hackathon Evaluation Report",
         "",
         "## Summary",
         "",
@@ -469,3 +592,111 @@ def write_scores_to_csv(
         writer.writerows(rows)
 
     log.info("Updated CSV: %s", csv_path)
+
+
+# ---------------------------------------------------------------------------
+# xlsx writer — updates the scorecard xlsx with computed scores
+# ---------------------------------------------------------------------------
+
+
+def write_scores_to_xlsx(
+    xlsx_path: Path,
+    sheet_name: str,
+    concept_scores: dict[int, ConceptScoreResult],
+    difficulty_scores: dict[int, DifficultyScoreEntry],
+    quality_scores: dict[int, CodeQualityResult],
+) -> None:
+    """Write evaluation scores into the named sheet of an xlsx workbook.
+
+    Preserves group row order exactly as-is. Fills Concept Score (10),
+    Difficulty Level (10), Code Quality (10), Total (30), and Position columns.
+
+    Args:
+        xlsx_path: Path to the xlsx workbook to update in-place.
+        sheet_name: Name of the sheet to update (e.g. 'C6').
+        concept_scores: Concept scores keyed by group number.
+        difficulty_scores: Difficulty scores keyed by group number.
+        quality_scores: Code quality scores keyed by group number.
+    """
+    wb = openpyxl.load_workbook(xlsx_path)
+    ws = wb[sheet_name]
+
+    # Locate header row and build column-name → column-index (1-based) map
+    col_map: dict[str, int] = {}
+    header_row_idx: int | None = None
+    for row in ws.iter_rows():
+        if row[0].value == "Group":
+            header_row_idx = row[0].row
+            for cell in row:
+                if cell.value is not None:
+                    col_map[str(cell.value)] = cell.column
+            break
+
+    assert (
+        header_row_idx is not None
+    ), f"No 'Group' header row found in sheet '{sheet_name}'"
+
+    # First pass: write scores and collect totals for position calculation
+    scored_totals: dict[int, int] = {}
+    for row in ws.iter_rows(min_row=header_row_idx + 1):
+        gn = _parse_group_number(row[0].value)
+        if gn is None:
+            continue
+
+        c = concept_scores.get(gn)
+        d = difficulty_scores.get(gn)
+        q = quality_scores.get(gn)
+        row_idx = row[0].row
+
+        if c and "Concept Score (10)" in col_map:
+            ws.cell(row=row_idx, column=col_map["Concept Score (10)"]).value = c.score
+        if d and "Difficulty Level (10)" in col_map:
+            ws.cell(row=row_idx, column=col_map["Difficulty Level (10)"]).value = (
+                d.score
+            )
+        if q and "Code Quality (10)" in col_map:
+            ws.cell(row=row_idx, column=col_map["Code Quality (10)"]).value = q.score
+
+        if "Comments" in col_map:
+            parts: list[str] = []
+            if c:
+                parts.append(f"Concept: {c.justification}")
+            if d:
+                parts.append(f"Difficulty: {d.justification}")
+            if q:
+                parts.append(f"Quality: {q.justification}")
+            if parts:
+                ws.cell(row=row_idx, column=col_map["Comments"]).value = " | ".join(
+                    parts
+                )
+
+        cs = c.score if c else 0
+        ds = d.score if d else 0
+        qs = q.score if q else 0
+        total = cs + ds + qs
+        if total > 0 and "Total (30)" in col_map:
+            ws.cell(row=row_idx, column=col_map["Total (30)"]).value = total
+            scored_totals[gn] = total
+
+    # Compute positions by rank (highest total = position 1)
+    sorted_groups = sorted(scored_totals.items(), key=lambda x: x[1], reverse=True)
+    positions: dict[int, int] = {}
+    prev_total = None
+    current_pos = 0
+    for i, (gn, total) in enumerate(sorted_groups):
+        if total != prev_total:
+            current_pos = i + 1
+        positions[gn] = current_pos
+        prev_total = total
+
+    # Second pass: write positions without changing row order
+    if "Position" in col_map:
+        for row in ws.iter_rows(min_row=header_row_idx + 1):
+            gn = _parse_group_number(row[0].value)
+            if gn is not None and gn in positions:
+                ws.cell(row=row[0].row, column=col_map["Position"]).value = positions[
+                    gn
+                ]
+
+    wb.save(xlsx_path)
+    log.info("Updated xlsx: %s sheet=%s", xlsx_path, sheet_name)

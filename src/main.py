@@ -38,8 +38,10 @@ from scoring import (
     generate_report,
     load_c3_reference,
     load_groups_from_csv,
+    load_groups_from_xlsx,
     load_syllabus,
     write_scores_to_csv,
+    write_scores_to_xlsx,
 )
 
 log = logging.getLogger("rank_bot")
@@ -69,8 +71,11 @@ def _repo_workspace(config: Config, repo: str) -> Path:
             return config.repo_c4_path
         case "c3":
             return config.repo_c3_path
+        case "c6":
+            # External repos are cloned by the agent; use base dir as workspace
+            return config.repo_c4_path.parent
         case _:
-            assert False, f"Unknown repo: {repo!r}, expected 'c3' or 'c4'"
+            assert False, f"Unknown repo: {repo!r}, expected 'c3', 'c4', or 'c6'"
 
 
 async def collect_project_summary(
@@ -138,7 +143,7 @@ async def run_evaluation(
 
     Args:
         config: Application configuration.
-        repo: Which repository to evaluate ('c3' or 'c4').
+        repo: Which repository to evaluate ('c3', 'c4', or 'c6').
         groups_override: If set, only evaluate these group numbers.
     """
     # --- Phase 0: Load data ---
@@ -146,8 +151,18 @@ async def run_evaluation(
     syllabus = load_syllabus(config.syllabus_csv_path)
     c3_ref = load_c3_reference(config.c3_csv_path)
 
-    csv_path = config.c4_csv_path if repo == "c4" else config.c3_csv_path
-    all_groups = load_groups_from_csv(csv_path)
+    match repo:
+        case "c6":
+            all_groups = load_groups_from_xlsx(
+                config.c6_xlsx_path, config.c6_sheet_name
+            )
+            csv_path: Path | None = None
+        case "c4":
+            csv_path = config.c4_csv_path
+            all_groups = load_groups_from_csv(csv_path)
+        case _:
+            csv_path = config.c3_csv_path
+            all_groups = load_groups_from_csv(csv_path)
 
     if groups_override:
         groups = [g for g in all_groups if g.group in groups_override]
@@ -172,60 +187,91 @@ async def run_evaluation(
         c3_ref
     ) + _schema_suffix(AllDifficultyScores)
 
-    # --- Phase 1: Collect project summaries for difficulty judge ---
-    log.info("Phase 1: Collecting project summaries")
-    summaries: dict[int, str] = {}
-    for g in groups:
-        log.info("Collecting summary for Group %d", g.group)
-        try:
-            summaries[g.group] = await collect_project_summary(g, config, repo=repo)
-        except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
-            log.error("Failed to collect summary for Group %d: %s", g.group, exc)
-            summaries[g.group] = f"Group {g.group}: Summary collection failed."
-        log.info("Summary collected for Group %d", g.group)
+    # Semaphore caps concurrent Cursor CLI subprocesses to avoid API overload
+    sem = asyncio.Semaphore(5)
+    workspace = _repo_workspace(config, repo)
 
-    # --- Phase 2: Per-project scoring (Concept + Code Quality) ---
-    log.info("Phase 2: Scoring Concept and Code Quality")
+    # --- Phase 1: Collect project summaries for difficulty judge (parallel) ---
+    log.info("Phase 1: Collecting project summaries (parallel)")
+
+    async def _summary_task(g: GroupInfo) -> tuple[int, str]:
+        async with sem:
+            log.info("Collecting summary for Group %d", g.group)
+            try:
+                result = await collect_project_summary(g, config, repo=repo)
+                log.info("Summary collected for Group %d", g.group)
+                return g.group, result
+            except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
+                log.error("Failed to collect summary for Group %d: %s", g.group, exc)
+                return g.group, f"Group {g.group}: Summary collection failed."
+
+    summary_results = await asyncio.gather(*[_summary_task(g) for g in groups])
+    summaries: dict[int, str] = dict(summary_results)
+
+    # --- Phase 2: Per-project scoring (Concept + Code Quality, parallel) ---
+    log.info("Phase 2: Scoring Concept and Code Quality (parallel)")
     concept_scores: dict[int, ConceptScoreResult] = {}
     quality_scores: dict[int, CodeQualityResult] = {}
 
-    for g in evaluable:
+    async def _concept_task(g: GroupInfo) -> tuple[int, ConceptScoreResult | None]:
         prompt = build_project_prompt(g, repo=repo)
-        workspace = _repo_workspace(config, repo)
-
-        try:
+        async with sem:
             log.info("Scoring Group %d — Concept", g.group)
-            concept_scores[g.group] = await run_structured_agent(
-                f"{concept_instructions}\n\n{prompt}",
-                workspace=workspace,
-                model=config.cursor_model,
-                output_type=ConceptScoreResult,
-                api_key=config.cursor_api_key,
-            )
-            log.info(
-                "Group %d Concept: %d/10",
-                g.group,
-                concept_scores[g.group].score,
-            )
-        except (RuntimeError, json.JSONDecodeError, ValidationError, KeyError) as exc:
-            log.error("Concept scoring failed for Group %d: %s", g.group, exc)
+            try:
+                score = await run_structured_agent(
+                    f"{concept_instructions}\n\n{prompt}",
+                    workspace=workspace,
+                    model=config.cursor_model,
+                    output_type=ConceptScoreResult,
+                    api_key=config.cursor_api_key,
+                )
+                log.info("Group %d Concept: %d/10", g.group, score.score)
+                return g.group, score
+            except (
+                RuntimeError,
+                json.JSONDecodeError,
+                ValidationError,
+                KeyError,
+            ) as exc:
+                log.error("Concept scoring failed for Group %d: %s", g.group, exc)
+                return g.group, None
 
-        try:
+    async def _quality_task(g: GroupInfo) -> tuple[int, CodeQualityResult | None]:
+        prompt = build_project_prompt(g, repo=repo)
+        async with sem:
             log.info("Scoring Group %d — Code Quality", g.group)
-            quality_scores[g.group] = await run_structured_agent(
-                f"{quality_instructions}\n\n{prompt}",
-                workspace=workspace,
-                model=config.cursor_model,
-                output_type=CodeQualityResult,
-                api_key=config.cursor_api_key,
-            )
-            log.info(
-                "Group %d Code Quality: %d/10",
-                g.group,
-                quality_scores[g.group].score,
-            )
-        except (RuntimeError, json.JSONDecodeError, ValidationError, KeyError) as exc:
-            log.error("Quality scoring failed for Group %d: %s", g.group, exc)
+            try:
+                score = await run_structured_agent(
+                    f"{quality_instructions}\n\n{prompt}",
+                    workspace=workspace,
+                    model=config.cursor_model,
+                    output_type=CodeQualityResult,
+                    api_key=config.cursor_api_key,
+                )
+                log.info("Group %d Code Quality: %d/10", g.group, score.score)
+                return g.group, score
+            except (
+                RuntimeError,
+                json.JSONDecodeError,
+                ValidationError,
+                KeyError,
+            ) as exc:
+                log.error("Quality scoring failed for Group %d: %s", g.group, exc)
+                return g.group, None
+
+    scoring_tasks = [_concept_task(g) for g in evaluable] + [
+        _quality_task(g) for g in evaluable
+    ]
+    scoring_results = await asyncio.gather(*scoring_tasks)
+
+    for gn, score in scoring_results:
+        if score is None:
+            continue
+        match score:
+            case ConceptScoreResult():
+                concept_scores[gn] = score
+            case CodeQualityResult():
+                quality_scores[gn] = score
 
     # --- Phase 3: Relative difficulty scoring (all at once) ---
     log.info("Phase 3: Scoring Difficulty (relative)")
@@ -247,10 +293,12 @@ async def run_evaluation(
 
     # --- Phase 4: Generate report ---
     log.info("Phase 4: Generating report")
-    report = generate_report(groups, concept_scores, difficulty_scores, quality_scores)
+    cohort = repo.upper()
+    report = generate_report(
+        groups, concept_scores, difficulty_scores, quality_scores, cohort=cohort
+    )
 
     base_dir = config.repo_c4_path.parent
-    cohort = repo.upper()
     report_path = base_dir / f"{cohort.lower()}_evaluation_report.md"
     report_path.write_text(report, encoding="utf-8")
     log.info("Report written to %s", report_path)
@@ -283,9 +331,19 @@ async def run_evaluation(
     json_path.write_text(json.dumps(scores_list, indent=2), encoding="utf-8")
     log.info("Scores written to %s", json_path)
 
-    # --- Phase 5: Update scorecard CSV with scores ---
-    log.info("Phase 5: Updating scorecard CSV")
-    write_scores_to_csv(csv_path, concept_scores, difficulty_scores, quality_scores)
+    # --- Phase 5: Update scorecard with scores ---
+    log.info("Phase 5: Updating scorecard")
+    if repo == "c6":
+        write_scores_to_xlsx(
+            config.c6_xlsx_path,
+            config.c6_sheet_name,
+            concept_scores,
+            difficulty_scores,
+            quality_scores,
+        )
+    else:
+        assert csv_path is not None
+        write_scores_to_csv(csv_path, concept_scores, difficulty_scores, quality_scores)
 
     # Print summary table
     print(f"\n{'='*60}")
@@ -313,10 +371,11 @@ def cli() -> None:
     """CLI entry point for rank-bot.
 
     Usage:
-        uv run python src/main.py                     # Evaluate all C4 groups
-        uv run python src/main.py --repo c3            # Evaluate C3 instead
-        uv run python src/main.py --groups 2 4 13      # Only specific groups
-        uv run python src/main.py --repo c3 --groups 4 5 12  # C3 calibration
+        uv run python src/main.py                          # Evaluate all C4 groups
+        uv run python src/main.py --repo c3                # Evaluate C3 instead
+        uv run python src/main.py --repo c6                # Evaluate C6 (xlsx, external repos)
+        uv run python src/main.py --groups 2 4 13          # Only specific groups
+        uv run python src/main.py --repo c6 --groups 1 2   # C6 subset
     """
     logging.basicConfig(
         level=logging.INFO,
