@@ -1,6 +1,6 @@
 # 🤖 Rank-Bot: AI-Powered Hackathon Judge
 
-An intelligent agent system built with the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) that automatically evaluates and ranks hackathon submissions based on concept usage, implementation difficulty, and code quality.
+An intelligent agent system powered by [Cursor CLI](https://cursor.com/docs/cli/headless) that automatically evaluates and ranks hackathon submissions based on concept usage, implementation difficulty, and code quality.
 
 ## 📋 Overview
 
@@ -21,7 +21,7 @@ The system uses a **multi-agent architecture** with three specialized judge agen
 - ✅ **Non-destructive Git inspection** using `git ls-tree` and `git show`
 - ✅ **Handles multiple submission formats**: branches, commits, zip files
 - ✅ **Calibrated scoring** using historical reference data
-- ✅ **OpenRouter API** for cost-effective LLM access
+- ✅ **Cursor CLI headless mode** (`agent -p`) for all LLM calls
 - ✅ **Pydantic structured outputs** for reliable JSON parsing
 - ✅ **Robust error handling** with partial run support
 - ✅ **Detailed evaluation reports** in Markdown and JSON
@@ -42,15 +42,22 @@ The system uses a **multi-agent architecture** with three specialized judge agen
         ┌──────────┐  ┌──────────┐  ┌──────────┐
         │ Concept  │  │Difficulty│  │  Code    │
         │  Judge   │  │  Judge   │  │ Quality  │
-        │  Agent   │  │  Agent   │  │  Judge   │
+        │  Prompt  │  │  Prompt  │  │  Prompt  │
         └──────────┘  └──────────┘  └──────────┘
              │             │             │
              └─────────────┼─────────────┘
                            │
                     ┌──────▼──────┐
-                    │   Tools     │
-                    │ (Git/FS)    │
-                    └─────────────┘
+                    │ Cursor CLI  │
+                    │  agent -p   │
+                    └──────┬──────┘
+                           │
+               ┌───────────┴───────────┐
+               ▼                       ▼
+        ┌─────────────┐       ┌─────────────────┐
+        │  Shell tool │       │  File read tool  │
+        │ (git, unzip)│       │  (local files)   │
+        └─────────────┘       └─────────────────┘
 ```
 
 ### Components
@@ -58,10 +65,9 @@ The system uses a **multi-agent architecture** with three specialized judge agen
 | Module | Purpose |
 |--------|---------|
 | **`main.py`** | Orchestrates the 3-phase evaluation pipeline |
-| **`agents_factory.py`** | Creates specialized judge agents with OpenRouter compatibility patches |
-| **`prompts.py`** | Contains detailed instructions for each judge agent |
-| **`tools.py`** | Git and filesystem tools for non-destructive code inspection |
-| **`models.py`** | Pydantic models for structured LLM outputs |
+| **`cursor_runner.py`** | Wraps Cursor CLI headless invocations; validates Pydantic outputs |
+| **`prompts.py`** | Contains detailed instructions for each judge |
+| **`models.py`** | Pydantic models for structured judge outputs |
 | **`scoring.py`** | CSV parsing, URL parsing, report generation |
 | **`config.py`** | Environment-based configuration management |
 
@@ -92,7 +98,7 @@ Phase 4: Generate Outputs
 
 - **Python 3.12+**
 - **uv** package manager ([installation guide](https://github.com/astral-sh/uv))
-- **OpenRouter API key** ([get one here](https://openrouter.ai/))
+- **Cursor CLI** installed and authenticated ([installation guide](https://cursor.com/docs/cli/installation))
 - **Git repositories**: Cloned C3 and C4 submission repos
 
 ### Installation
@@ -103,26 +109,35 @@ Phase 4: Generate Outputs
    cd rank-bot
    ```
 
-2. **Install dependencies**
+2. **Install Cursor CLI** (if not already installed)
+   ```bash
+   curl https://cursor.com/install -fsS | bash
+   # Then authenticate
+   agent login
+   ```
+
+3. **Install Python dependencies**
    ```bash
    uv sync
    ```
 
-3. **Set up environment variables**
-   
+4. **Set up environment variables**
+
    Create a `.env` file in the project root:
    ```bash
-   # Required
-   OPENROUTER_API_KEY=your_api_key_here
-   
+   # Optional — Cursor CLI uses browser login by default
+   # Set only if authenticating via API key (CI/CD, automation)
+   CURSOR_API_KEY=your_cursor_api_key_here
+
    # Optional (defaults shown)
-   RANK_BOT_MODEL=anthropic/claude-sonnet-4
+   CURSOR_MODEL=sonnet-4.6
    RANK_BOT_BASE=/path/to/rank-bot  # Auto-detected if not set
    ```
 
-4. **Verify setup**
+5. **Verify setup**
    ```bash
-   uv run python -c "from src.config import Config; print('✅ Config loaded')"
+   agent status          # confirm Cursor CLI is authenticated
+   uv run python -c "import sys; sys.path.append('src'); from config import Config; print('Config loaded')"
    ```
 
 ### Directory Structure
@@ -192,21 +207,17 @@ After running, you'll find:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENROUTER_API_KEY` | **Required**. Your OpenRouter API key | - |
-| `RANK_BOT_MODEL` | Model to use for evaluation | `anthropic/claude-sonnet-4` |
+| `CURSOR_MODEL` | Cursor model to use for evaluation | `sonnet-4.6` |
+| `CURSOR_API_KEY` | API key for Cursor CLI (optional; browser login used otherwise) | - |
 | `RANK_BOT_BASE` | Base directory for the project | Auto-detected |
 
 ### Model Selection
 
-Recommended models for cost/quality balance:
-
-- **Best quality**: `anthropic/claude-sonnet-4` (default)
-- **Budget-friendly**: `google/gemini-2.0-flash-001`
-- **Balanced**: `openai/gpt-4o-mini`
+The model is passed directly to Cursor CLI via `--model`. Use `agent models` to list models available on your account.
 
 Change model in `.env`:
 ```bash
-RANK_BOT_MODEL=google/gemini-2.0-flash-001
+CURSOR_MODEL=sonnet-4.6
 ```
 
 ### Scoring Calibration
@@ -226,9 +237,8 @@ The system uses historical reference scores for calibration. Key calibration poi
 ```
 src/
 ├── main.py              # Entry point and orchestration
-├── agents_factory.py    # Agent creation with SDK patches
-├── prompts.py           # Judge agent instructions
-├── tools.py             # Git/filesystem tools
+├── cursor_runner.py     # Cursor CLI subprocess wrapper + Pydantic validation
+├── prompts.py           # Judge instructions (shell-command oriented)
 ├── models.py            # Pydantic schemas
 ├── scoring.py           # CSV/report utilities
 └── config.py            # Configuration management
@@ -239,48 +249,27 @@ src/
 1. **Functional Core, Imperative Shell**: Pure functions in `scoring.py`, side effects in `main.py`
 2. **Errors as Values**: No nested try-except blocks; graceful degradation
 3. **Frozen Dataclasses**: Immutable domain models (`GroupInfo`, `Config`)
-4. **Pydantic for I/O**: Structured LLM outputs with validation
-5. **Monkey Patches**: SDK compatibility fixes for OpenRouter
+4. **Pydantic for I/O**: Structured outputs validated from Cursor CLI's final JSON response
 
-### SDK Compatibility Patches
+### How Cursor CLI Is Invoked
 
-The system includes two critical patches in `agents_factory.py`:
-
-1. **Response Format Patch**: Forces `json_object` mode (OpenRouter doesn't support `json_schema`)
-2. **JSON Extraction Patch**: Strips preamble text that Claude adds before JSON
-
-### Adding New Tools
-
-Tools are defined in `tools.py` using the `@function_tool` decorator:
+Each judge phase runs Cursor CLI in headless mode and pipes the prompt via stdin:
 
 ```python
-from openai_agents import function_tool
-
-@function_tool
-def my_new_tool(param: str) -> str:
-    """Tool description for the LLM.
-    
-    Args:
-        param: Parameter description
-        
-    Returns:
-        str: Result description
-    """
-    # Implementation
-    return result
+proc = await asyncio.create_subprocess_exec(
+    "agent", "-p", "--force", "--trust",
+    "--model", config.cursor_model,
+    "--output-format", "json",
+    "--workspace", str(workspace),
+    stdin=asyncio.subprocess.PIPE,
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+)
+stdout, _ = await proc.communicate(input=prompt.encode())
+result_text = json.loads(stdout.decode())["result"]
 ```
 
-Register in `tools.py`:
-```python
-ALL_TOOLS = [
-    git_list_files,
-    git_read_file,
-    read_local_file,
-    list_local_directory,
-    extract_zip_and_list,
-    my_new_tool,  # Add here
-]
-```
+The CLI's built-in shell and file tools handle all git inspection — no custom tool layer needed.
 
 ## 📊 Evaluation Criteria
 
@@ -327,34 +316,26 @@ Evaluates project organization:
 
 ### Common Issues
 
-**Issue**: `OPENROUTER_API_KEY environment variable must be set`
+**Issue**: `Cursor CLI failed with code 1` / `Not authenticated`
 ```bash
-# Solution: Create .env file with your API key
-echo "OPENROUTER_API_KEY=your_key_here" > .env
+# Solution: Log in via browser
+agent login
+# Or set an API key from https://cursor.com/dashboard/integrations
+echo "CURSOR_API_KEY=your_key_here" > .env
 ```
 
-**Issue**: `ModuleNotFoundError: No module named 'agents'`
+**Issue**: `agent: command not found`
 ```bash
-# Solution: Install dependencies
-uv sync
+# Solution: Install Cursor CLI and add it to PATH
+curl https://cursor.com/install -fsS | bash
+# Then follow the PATH setup instructions printed by the installer
 ```
 
-**Issue**: `APIStatusError: Error code: 402 - insufficient credits`
+**Issue**: `RuntimeError: Cursor CLI returned an error result`
 ```bash
-# Solutions:
-# 1. Top up credits at https://openrouter.ai/settings/keys
-# 2. Switch to a cheaper model in .env:
-echo "RANK_BOT_MODEL=google/gemini-2.0-flash-001" >> .env
-# 3. Resume with --groups flag to skip already-scored groups
+# The CLI ran but the agent reported an error — check stderr output.
+# Resume with --groups flag to retry only failed groups:
 uv run python src/main.py --groups 10 11 12
-```
-
-**Issue**: `MaxTurnsExceeded: Max turns (20) exceeded`
-```bash
-# This means the agent is reading too many files
-# The system has efficiency guidance built-in, but you can:
-# 1. Increase max_turns in main.py (already set to 20)
-# 2. Check if the project has excessive files
 ```
 
 ### Debug Mode
@@ -375,8 +356,7 @@ This project is for educational and evaluation purposes as part of the AI Accele
 
 ## 🙏 Acknowledgments
 
-- Built with [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
-- Powered by [OpenRouter](https://openrouter.ai/) for multi-model access
+- Powered by [Cursor CLI](https://cursor.com/docs/cli/headless) for headless agent execution
 - Uses [uv](https://github.com/astral-sh/uv) for fast Python package management
 
 ---

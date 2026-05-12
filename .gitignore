@@ -210,3 +210,9 @@ __marimo__/
 Submissions*
 sheets
 output
+
+# macOS
+.DS_Store
+
+# Cohort submission demos (not part of the bot itself)
+C5_Group5/
