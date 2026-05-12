@@ -13,8 +13,8 @@ class Config:
     """Immutable configuration for the rank-bot pipeline.
 
     Attributes:
-        openrouter_api_key: API key for OpenRouter.
-        model_name: Model identifier on OpenRouter (e.g. 'anthropic/claude-sonnet-4').
+        cursor_model: Model identifier for Cursor CLI.
+        cursor_api_key: Optional API key for Cursor CLI automation.
         repo_c4_path: Local path to the cloned C4 submissions repo.
         repo_c3_path: Local path to the cloned C3 submissions repo.
         c3_csv_path: Path to the C3 scorecard CSV.
@@ -22,13 +22,10 @@ class Config:
         syllabus_csv_path: Path to the syllabus CSV.
         max_file_lines: Maximum lines to read from a single file (truncation limit).
         git_timeout: Timeout in seconds for git subprocess calls.
-
-    Raises:
-        AssertionError: If required environment variables are missing.
     """
 
-    openrouter_api_key: str
-    model_name: str
+    cursor_model: str
+    cursor_api_key: str | None
     repo_c4_path: Path
     repo_c3_path: Path
     c3_csv_path: Path
@@ -43,20 +40,14 @@ class Config:
 
         Returns:
             Config: Fully populated configuration.
-
-        Raises:
-            AssertionError: If OPENROUTER_API_KEY is not set.
         """
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        assert api_key, "OPENROUTER_API_KEY environment variable must be set"
-
         base = Path(
             os.environ.get("RANK_BOT_BASE", Path(__file__).resolve().parents[1])
         )
 
         return cls(
-            openrouter_api_key=api_key,
-            model_name=os.environ.get("RANK_BOT_MODEL", "anthropic/claude-sonnet-4"),
+            cursor_model=os.environ.get("CURSOR_MODEL", "sonnet-4.6"),
+            cursor_api_key=os.environ.get("CURSOR_API_KEY"),
             repo_c4_path=base / "Submissions-C4",
             repo_c3_path=base / "Submissions_C3",
             c3_csv_path=base

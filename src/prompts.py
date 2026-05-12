@@ -63,7 +63,9 @@ Key calibration points from C3 scoring:
 
 ## How to Evaluate
 
-1. First use the tools to list the project's files.
+1. First inspect the project's files. Use shell commands such as
+   `git ls-tree -r --name-only <ref>` for git refs, or directory listings for
+   local files.
 2. Read the README to understand what the project claims to do.
 3. Read 3-5 key code files: look for imports of LangGraph, LangChain, vector
    store libraries, embedding models, Gradio/Streamlit, etc.
@@ -155,7 +157,9 @@ Key calibration points from C3 scoring:
 
 ## How to Evaluate
 
-1. First list all files to see the directory structure.
+1. First list all files to see the directory structure. Use shell commands such
+   as `git ls-tree -r --name-only <ref>` for git refs, or directory listings
+   for local files.
 2. Check if README.md exists and read it.
 3. Check for requirements.txt / pyproject.toml.
 4. Check for .env / .env.example handling (look at imports for dotenv,

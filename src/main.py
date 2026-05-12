@@ -16,17 +16,31 @@ import logging
 import sys
 from pathlib import Path
 
-from agents import Runner
-from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError
 from dotenv import load_dotenv
-from openai import APIStatusError
+from pydantic import ValidationError
 
-from agents_factory import create_agents
 from config import Config
-from models import (CodeQualityResult, ConceptScoreResult,
-                    DifficultyScoreEntry, GroupInfo)
-from scoring import (build_project_prompt, generate_report, load_c3_reference,
-                     load_groups_from_csv, load_syllabus, write_scores_to_csv)
+from cursor_runner import _schema_suffix, run_cursor_agent, run_structured_agent
+from models import (
+    AllDifficultyScores,
+    CodeQualityResult,
+    ConceptScoreResult,
+    DifficultyScoreEntry,
+    GroupInfo,
+)
+from prompts import (
+    build_code_quality_judge_instructions,
+    build_concept_judge_instructions,
+    build_difficulty_judge_instructions,
+)
+from scoring import (
+    build_project_prompt,
+    generate_report,
+    load_c3_reference,
+    load_groups_from_csv,
+    load_syllabus,
+    write_scores_to_csv,
+)
 
 log = logging.getLogger("rank_bot")
 
@@ -37,32 +51,59 @@ log = logging.getLogger("rank_bot")
 # ---------------------------------------------------------------------------
 
 
+def _repo_workspace(config: Config, repo: str) -> Path:
+    """Resolve the workspace directory for a submissions repo label.
+
+    Args:
+        config: Application configuration.
+        repo: Which repository to evaluate ('c3' or 'c4').
+
+    Returns:
+        Path to the local submissions repository.
+
+    Raises:
+        AssertionError: If repo is not 'c3' or 'c4'.
+    """
+    match repo:
+        case "c4":
+            return config.repo_c4_path
+        case "c3":
+            return config.repo_c3_path
+        case _:
+            assert False, f"Unknown repo: {repo!r}, expected 'c3' or 'c4'"
+
+
 async def collect_project_summary(
     group: GroupInfo,
-    concept_judge: object,
+    config: Config,
     repo: str = "c4",
 ) -> str:
     """Collect a text summary of a project by running a lightweight probe.
 
-    For groups with no submission, returns a placeholder.  Otherwise, uses
-    the concept judge's tools (via a temporary agent run) to list files and
-    read the README, then returns a textual summary.
+    For groups with no submission, returns a placeholder. Otherwise, uses
+    Cursor CLI to inspect the project and return a textual summary.
 
     Args:
         group: Parsed group info.
-        concept_judge: An Agent with tools attached (reused for tool access).
+        config: Application configuration.
         repo: Which repo to probe ('c3' or 'c4').
 
     Returns:
         A text summary string suitable for the difficulty judge.
+
+    Raises:
+        RuntimeError: If Cursor CLI fails.
+        json.JSONDecodeError: If Cursor CLI emits malformed JSON.
+        KeyError: If Cursor CLI omits the result field.
     """
     if group.branch is None:
         return f"Group {group.group}: No submission — no code available."
 
     prompt = build_project_prompt(group, repo=repo)
-    # We use the concept judge here just to get tool access for file listing.
-    # The actual scoring is done separately.
     summary_prompt = (
+        "You are a technical project summarizer. Use Cursor CLI's shell and "
+        "file-reading capabilities to explore the project. Do NOT score "
+        "anything.\n\n"
         f"{prompt}\n\n"
         "DO NOT SCORE. Instead, provide a brief technical summary of this project:\n"
         "1. What does the project do? (1-2 sentences)\n"
@@ -74,21 +115,13 @@ async def collect_project_summary(
         "Keep it concise — 10-15 lines max."
     )
 
-    from agents import Agent, ModelSettings
-
-    from tools import ALL_TOOLS
-
-    # Create a lightweight summarizer agent (no structured output)
-    summarizer = Agent(
-        name="ProjectSummarizer",
-        model=concept_judge.model,
-        model_settings=ModelSettings(max_tokens=4096),
-        instructions="You are a technical project summarizer. Use the provided tools to explore the project and return a concise summary. Do NOT score anything.",
-        tools=ALL_TOOLS,
+    result = await run_cursor_agent(
+        summary_prompt,
+        workspace=_repo_workspace(config, repo),
+        model=config.cursor_model,
+        api_key=config.cursor_api_key,
     )
-
-    result = await Runner.run(summarizer, summary_prompt, max_turns=15)
-    return f"## Group {group.group}\n{result.final_output}"
+    return f"## Group {group.group}\n{result}"
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +161,16 @@ async def run_evaluation(
         len(evaluable),
     )
 
-    # --- Phase 0.5: Create agents ---
-    concept_judge, quality_judge, difficulty_judge = create_agents(
-        config,
-        syllabus,
-        c3_ref,
-    )
+    # --- Phase 0.5: Build Cursor CLI prompts ---
+    concept_instructions = build_concept_judge_instructions(
+        syllabus, c3_ref
+    ) + _schema_suffix(ConceptScoreResult)
+    quality_instructions = build_code_quality_judge_instructions(
+        c3_ref
+    ) + _schema_suffix(CodeQualityResult)
+    difficulty_instructions = build_difficulty_judge_instructions(
+        c3_ref
+    ) + _schema_suffix(AllDifficultyScores)
 
     # --- Phase 1: Collect project summaries for difficulty judge ---
     log.info("Phase 1: Collecting project summaries")
@@ -141,10 +178,8 @@ async def run_evaluation(
     for g in groups:
         log.info("Collecting summary for Group %d", g.group)
         try:
-            summaries[g.group] = await collect_project_summary(
-                g, concept_judge, repo=repo
-            )
-        except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
+            summaries[g.group] = await collect_project_summary(g, config, repo=repo)
+        except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
             log.error("Failed to collect summary for Group %d: %s", g.group, exc)
             summaries[g.group] = f"Group {g.group}: Summary collection failed."
         log.info("Summary collected for Group %d", g.group)
@@ -156,29 +191,40 @@ async def run_evaluation(
 
     for g in evaluable:
         prompt = build_project_prompt(g, repo=repo)
+        workspace = _repo_workspace(config, repo)
 
         try:
             log.info("Scoring Group %d — Concept", g.group)
-            concept_result = await Runner.run(concept_judge, prompt, max_turns=20)
-            concept_scores[g.group] = concept_result.final_output
+            concept_scores[g.group] = await run_structured_agent(
+                f"{concept_instructions}\n\n{prompt}",
+                workspace=workspace,
+                model=config.cursor_model,
+                output_type=ConceptScoreResult,
+                api_key=config.cursor_api_key,
+            )
             log.info(
                 "Group %d Concept: %d/10",
                 g.group,
                 concept_scores[g.group].score,
             )
-        except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
+        except (RuntimeError, json.JSONDecodeError, ValidationError, KeyError) as exc:
             log.error("Concept scoring failed for Group %d: %s", g.group, exc)
 
         try:
             log.info("Scoring Group %d — Code Quality", g.group)
-            quality_result = await Runner.run(quality_judge, prompt, max_turns=20)
-            quality_scores[g.group] = quality_result.final_output
+            quality_scores[g.group] = await run_structured_agent(
+                f"{quality_instructions}\n\n{prompt}",
+                workspace=workspace,
+                model=config.cursor_model,
+                output_type=CodeQualityResult,
+                api_key=config.cursor_api_key,
+            )
             log.info(
                 "Group %d Code Quality: %d/10",
                 g.group,
                 quality_scores[g.group].score,
             )
-        except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
+        except (RuntimeError, json.JSONDecodeError, ValidationError, KeyError) as exc:
             log.error("Quality scoring failed for Group %d: %s", g.group, exc)
 
     # --- Phase 3: Relative difficulty scoring (all at once) ---
@@ -186,13 +232,17 @@ async def run_evaluation(
     all_summaries_text = "\n\n---\n\n".join(summaries[g.group] for g in groups)
     difficulty_scores: dict[int, DifficultyScoreEntry] = {}
     try:
-        diff_result = await Runner.run(
-            difficulty_judge, all_summaries_text, max_turns=5
+        diff_result = await run_structured_agent(
+            f"{difficulty_instructions}\n\n{all_summaries_text}",
+            workspace=config.repo_c4_path.parent,
+            model=config.cursor_model,
+            output_type=AllDifficultyScores,
+            api_key=config.cursor_api_key,
         )
-        difficulty_scores = {s.group: s for s in diff_result.final_output.scores}
+        difficulty_scores = {s.group: s for s in diff_result.scores}
         for gn, entry in sorted(difficulty_scores.items()):
             log.info("Group %d Difficulty: %d/10", gn, entry.score)
-    except (APIStatusError, MaxTurnsExceeded, ModelBehaviorError) as exc:
+    except (RuntimeError, json.JSONDecodeError, ValidationError, KeyError) as exc:
         log.error("Difficulty scoring failed: %s", exc)
 
     # --- Phase 4: Generate report ---

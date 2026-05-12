@@ -9,8 +9,12 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
-from models import (CodeQualityResult, ConceptScoreResult,
-                    DifficultyScoreEntry, GroupInfo)
+from models import (
+    CodeQualityResult,
+    ConceptScoreResult,
+    DifficultyScoreEntry,
+    GroupInfo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +201,7 @@ def build_project_prompt(group: GroupInfo, repo: str = "c4") -> str:
     """Build the evaluation prompt for a single group, with tool-use hints.
 
     Uses ``match`` on the group's link characteristics to provide the right
-    instructions for tool calls.
+    instructions for Cursor CLI shell and file inspection.
 
     Args:
         group: Parsed group metadata.
@@ -222,8 +226,11 @@ def build_project_prompt(group: GroupInfo, repo: str = "c4") -> str:
                 f"- Repo: '{repo}'\n"
                 f"- Branch: '{group.branch}'\n"
                 f"- Zip path: '{group.path}'\n\n"
-                f"Use the `extract_zip_and_list` tool to list files in the zip, "
-                f"then use `read_file_from_zip` to read key files like README, "
+                f"You are running from the submissions repository workspace. "
+                f"Use shell commands to inspect the zip without changing branches. "
+                f"For example, run `git show origin/{group.branch}:{group.path}` "
+                f"to read the zip bytes into a temporary file, then use `unzip -l` "
+                f"to list files and `unzip -p` to read key files like README, "
                 f"main app files, and agent/graph definitions.\n\n"
                 f"Note: .zip submissions indicate poor code quality practices "
                 f"(should have been committed properly to git)."
@@ -236,23 +243,25 @@ def build_project_prompt(group: GroupInfo, repo: str = "c4") -> str:
                 f"- Repo: '{repo}'\n"
                 f"- Commit/Branch ref: '{group.branch}'\n"
                 f"{path_hint}\n\n"
-                f"Use `git_list_files` with branch='{group.branch}' to list files, "
-                f"then `git_read_file` to read key files.\n"
+                f"You are running from the submissions repository workspace. "
+                f"Use `git ls-tree -r --name-only {group.branch}` to list files, "
+                f"then `git show {group.branch}:<filepath>` to read key files.\n"
                 f"Look for README, app entry points, agent definitions, and graph files."
             )
         case _:
             assert group.branch is not None
             use_local = group.branch == "main"
             path_hint = group.path or ""
+            path_clause = f" -- {path_hint}" if path_hint else ""
 
             if use_local:
                 return header + (
                     f"This project is on the main branch.\n"
                     f"- Repo: '{repo}'\n"
                     f"- Directory: '{path_hint}'\n\n"
-                    f"Use `list_local_directory` with repo='{repo}' and "
-                    f"dirpath='{path_hint}' to see the file structure, "
-                    f"then use `read_local_file` to read key files.\n"
+                    f"You are running from the submissions repository workspace. "
+                    f"Use directory listings and file reads under `{path_hint}` "
+                    f"to inspect the file structure and key files.\n"
                     f"Look for README, app entry points, agent definitions, and graph files."
                 )
             return header + (
@@ -260,9 +269,11 @@ def build_project_prompt(group: GroupInfo, repo: str = "c4") -> str:
                 f"- Repo: '{repo}'\n"
                 f"- Branch: '{group.branch}'\n"
                 f"- Path: '{path_hint}'\n\n"
-                f"Use `git_list_files` with repo='{repo}', branch='{group.branch}' "
-                f"and path='{path_hint}' to see the file structure, "
-                f"then use `git_read_file` to read key files.\n"
+                f"You are running from the submissions repository workspace. "
+                f"Use `git ls-tree -r --name-only origin/{group.branch}{path_clause}` "
+                f"to see the file "
+                f"structure, then `git show origin/{group.branch}:<filepath>` "
+                f"to read key files.\n"
                 f"Look for README, app entry points, agent definitions, and graph files."
             )
 
